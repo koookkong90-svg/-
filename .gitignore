@@ -269,6 +269,49 @@ AGENTS.md
 .codex/
 
 # ------------------------------------------
+# Local account, authentication and session data
+# (Only explicit sensitive runtime files are ignored.)
+# ------------------------------------------
+**/cookie.json
+**/cookies.json
+**/cookie.txt
+**/cookies.txt
+**/token.json
+**/tokens.json
+**/token.txt
+**/tokens.txt
+**/credentials.json
+**/credentials.txt
+**/account_credentials.json
+**/xianyu_accounts.json
+**/storage_state.json
+**/auth_state.json
+
+# Keep public examples and templates trackable.
+!**/*.example.json
+!**/*.template.json
+!**/*.example.txt
+!**/*.template.txt
+
+# Local login sessions, browser profiles and runtime data.
+**/sessions/
+**/session_data/
+**/user_data/
+**/user-data/
+**/chrome_profile/
+**/browser_profile/
+**/.auth/
+**/runtime/
+
+# Database sidecar runtime files.
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+
+# ------------------------------------------
 # 本地需求文件（不纳入版本管理）
 # ------------------------------------------
 /需求.txt
