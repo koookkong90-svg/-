@@ -9,7 +9,12 @@
 **/.env.local
 **/.env.*.local
 .env.enc
+.env.remote
 !**/.env.example
+
+# Generated deployment Compose files
+docker-compose.deploy.yml
+docker-compose.remote.yml
 
 # ------------------------------------------
 # Python相关
