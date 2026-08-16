@@ -1078,7 +1078,11 @@ async def renew_account_login(
                     continue
 
                 # 调用共通服务执行接口续期
-                renew_result = await cookie_renew_api_service.renew(cookies_str, account_id)
+                renew_result = await cookie_renew_api_service.renew(
+                    cookies_str,
+                    account_id,
+                    owner_id=account.owner_id,
+                )
 
                 # 不管续期是否成功，只要有Cookie字段更新就先写入数据库
                 if renew_result.updated_cookie_names and renew_result.new_cookies_str != cookies_str:

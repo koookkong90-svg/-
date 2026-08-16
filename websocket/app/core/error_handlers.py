@@ -70,7 +70,8 @@ async def http_exception_handler(request: Request, exc: Exception) -> JSONRespon
         
         # 返回统一格式的错误响应
         return JSONResponse(
-            status_code=status.HTTP_200_OK,  # 统一返回200
+            status_code=exc.status_code,
+            headers=exc.headers,
             content={
                 "success": False,
                 "code": exc.status_code,

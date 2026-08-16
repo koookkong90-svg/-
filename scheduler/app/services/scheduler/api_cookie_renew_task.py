@@ -246,7 +246,12 @@ class ApiCookieRenewTaskService:
         logger.info(f"【{self.task_name}】开始处理账号: {account_id}")
 
         # 调用共通服务执行续期（接口续期 → 浏览器续期）
-        renew_result = await cookie_renew_api_service.renew(cookies_str, account_id, source="scheduled_task")
+        renew_result = await cookie_renew_api_service.renew(
+            cookies_str,
+            account_id,
+            owner_id=account.owner_id,
+            source="scheduled_task",
+        )
 
         # 仅在 cookies 真正发生变化时更新数据库
         if (

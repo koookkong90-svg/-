@@ -27,8 +27,11 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 from loguru import logger
+from sqlalchemy import select
 
 from common.core.config import get_internal_service_secret, get_settings
+from common.db.session import async_session_maker
+from common.models.xy_account import XYAccount
 from common.services.captcha.concurrency import (
     account_browser_lock_manager,
     concurrency_manager,
@@ -134,6 +137,7 @@ class CookieRenewBrowserService:
         self,
         cookies_str: str,
         account_id: str = "",
+        owner_id: int | None = None,
     ) -> CookieRenewBrowserResult:
         """执行浏览器续期（自动分发：本地执行 或 HTTP 委托 WebSocket 执行）。
 
@@ -149,6 +153,7 @@ class CookieRenewBrowserService:
         Args:
             cookies_str: 当前完整的Cookie字符串
             account_id: 账号ID（用于日志标识与持久化目录隔离）
+            owner_id: 数据库中的账号归属ID；HTTP 委托时必填
 
         Returns:
             CookieRenewBrowserResult: 浏览器续期结果
@@ -159,16 +164,33 @@ class CookieRenewBrowserService:
             else "【Cookie浏览器续期】"
         )
 
+        # 非 WebSocket 进程：HTTP 委托给 WebSocket 服务执行
+        if not _LOCAL_BROWSER_RENEW_ENABLED:
+            if not account_id or owner_id is None:
+                return CookieRenewBrowserResult(
+                    success=False,
+                    has_quick_enter=False,
+                    message="缺少账号归属信息，拒绝委托浏览器续期",
+                )
+            if not cookies_str or not cookies_str.strip():
+                return CookieRenewBrowserResult(
+                    success=False,
+                    has_quick_enter=False,
+                    message="Cookie为空，无法执行浏览器续期",
+                )
+            return await self._renew_via_websocket(
+                cookies_str,
+                account_id,
+                owner_id,
+                log_prefix,
+            )
+
         if not cookies_str or not cookies_str.strip():
             return CookieRenewBrowserResult(
                 success=False,
                 has_quick_enter=False,
                 message="Cookie为空，无法执行浏览器续期",
             )
-
-        # 非 WebSocket 进程：HTTP 委托给 WebSocket 服务执行
-        if not _LOCAL_BROWSER_RENEW_ENABLED:
-            return await self._renew_via_websocket(cookies_str, account_id, log_prefix)
 
         if not PLAYWRIGHT_AVAILABLE:
             return CookieRenewBrowserResult(
@@ -209,14 +231,28 @@ class CookieRenewBrowserService:
         self,
         cookies_str: str,
         account_id: str,
+        owner_id: int,
         log_prefix: str,
     ) -> CookieRenewBrowserResult:
         """通过 HTTP 委托 WebSocket 服务执行浏览器续期。
 
         WebSocket 服务提供 /internal/cookies/browser-renew 接口，在其进程内串行执行
-        浏览器续期（复用持久化目录与账号级互斥锁），并返回续期结果。
+        浏览器续期（复用持久化目录与账号级互斥锁）。接口只返回安全摘要，
+        成功后本服务按账号 ID 与归属 ID 从数据库重新读取最新 Cookie。
         """
         try:
+            if not await self._persist_owned_cookie_candidate(
+                account_id,
+                owner_id,
+                cookies_str,
+                log_prefix,
+            ):
+                return CookieRenewBrowserResult(
+                    success=False,
+                    has_quick_enter=False,
+                    message="无法按账号归属准备浏览器续期",
+                )
+
             settings = get_settings()
             base_url = getattr(settings, "websocket_service_url", "") or ""
             base_url = base_url.rstrip("/")
@@ -234,25 +270,44 @@ class CookieRenewBrowserService:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     renew_url,
-                    json={"account_id": account_id, "cookies_str": cookies_str},
+                    json={"account_id": account_id, "owner_id": owner_id},
                     headers={
                         "X-Internal-Service-Secret": get_internal_service_secret(),
                     },
                 ) as response:
                     if response.status != 200:
-                        text = await response.text()
                         return CookieRenewBrowserResult(
                             success=False,
                             has_quick_enter=False,
-                            message=f"委托浏览器续期HTTP状态异常({response.status}): {text[:200]}",
+                            message=f"委托浏览器续期HTTP状态异常({response.status})",
                         )
                     payload = await response.json()
 
             data = payload.get("data") or {}
+            success = bool(payload.get("success"))
+            if not success:
+                return CookieRenewBrowserResult(
+                    success=False,
+                    has_quick_enter=bool(data.get("has_quick_enter", False)),
+                    updated_cookie_names=list(data.get("updated_cookie_names", []) or []),
+                    message=payload.get("message", "") or "",
+                )
+
+            refreshed_cookies_str = await self._load_owned_cookie(
+                account_id,
+                owner_id,
+            )
+            if not refreshed_cookies_str:
+                return CookieRenewBrowserResult(
+                    success=False,
+                    has_quick_enter=bool(data.get("has_quick_enter", False)),
+                    message="浏览器续期完成，但无法从数据库读取最新 Cookie",
+                )
+
             return CookieRenewBrowserResult(
-                success=bool(payload.get("success")),
+                success=True,
                 has_quick_enter=bool(data.get("has_quick_enter", False)),
-                new_cookies_str=data.get("new_cookies_str", "") or "",
+                new_cookies_str=refreshed_cookies_str,
                 updated_cookie_names=list(data.get("updated_cookie_names", []) or []),
                 message=payload.get("message", "") or "",
             )
@@ -264,19 +319,69 @@ class CookieRenewBrowserService:
                 message=f"委托浏览器续期超时（超过 {_BROWSER_RENEW_HTTP_TIMEOUT_SECONDS} 秒）",
             )
         except aiohttp.ClientError as exc:
-            logger.warning(f"{log_prefix} 委托浏览器续期网络请求失败: {exc}")
+            logger.warning(
+                f"{log_prefix} 委托浏览器续期网络请求失败 "
+                f"({type(exc).__name__})"
+            )
             return CookieRenewBrowserResult(
                 success=False,
                 has_quick_enter=False,
-                message=f"委托浏览器续期网络请求失败: {exc}",
+                message="委托浏览器续期网络请求失败",
             )
         except Exception as exc:
-            logger.error(f"{log_prefix} 委托浏览器续期异常: {exc}")
+            logger.error(
+                f"{log_prefix} 委托浏览器续期异常 ({type(exc).__name__})"
+            )
             return CookieRenewBrowserResult(
                 success=False,
                 has_quick_enter=False,
-                message=f"委托浏览器续期异常: {exc}",
+                message="委托浏览器续期异常",
             )
+
+    async def _persist_owned_cookie_candidate(
+        self,
+        account_id: str,
+        owner_id: int,
+        cookies_str: str,
+        log_prefix: str,
+    ) -> bool:
+        """严格按账号归属保存可信候选 Cookie，不经 HTTP 传输。"""
+        try:
+            async with async_session_maker() as session:
+                result = await session.execute(
+                    select(XYAccount).where(
+                        XYAccount.account_id == account_id,
+                        XYAccount.owner_id == owner_id,
+                    ).with_for_update()
+                )
+                account = result.scalar_one_or_none()
+                if not account:
+                    logger.warning(f"{log_prefix} 无法按账号归属准备浏览器续期")
+                    return False
+                account.cookie = cookies_str
+                session.add(account)
+                await session.commit()
+            return True
+        except Exception as exc:
+            logger.error(
+                f"{log_prefix} 准备浏览器续期异常 ({type(exc).__name__})"
+            )
+            return False
+
+    async def _load_owned_cookie(
+        self,
+        account_id: str,
+        owner_id: int,
+    ) -> str | None:
+        """严格按账号 ID 与归属 ID 读取 Cookie，不做单账号 ID 回退。"""
+        async with async_session_maker() as session:
+            result = await session.execute(
+                select(XYAccount.cookie).where(
+                    XYAccount.account_id == account_id,
+                    XYAccount.owner_id == owner_id,
+                )
+            )
+            return result.scalar_one_or_none()
 
     def renew_local(
         self,
@@ -594,11 +699,13 @@ class CookieRenewBrowserService:
             )
 
         except Exception as exc:
-            logger.error(f"{log_prefix} 浏览器续期异常: {exc}")
+            logger.error(
+                f"{log_prefix} 浏览器续期异常 ({type(exc).__name__})"
+            )
             return CookieRenewBrowserResult(
                 success=False,
                 has_quick_enter=False,
-                message=f"浏览器续期异常: {exc}",
+                message="浏览器续期异常",
             )
         finally:
             # 清理浏览器资源（持久化上下文模式：关闭 context 即可，无独立 browser 对象）

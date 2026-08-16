@@ -24,11 +24,8 @@ from common.models.cookie_refresh_schedule import CookieRefreshSchedule
 from common.models.scheduled_cookies_refresh_log import ScheduledCookiesRefreshLog
 from common.models.xy_account import XYAccount
 from common.utils.cookie_refresh import (
-    build_cookie_string_from_browser_cookies,
     get_cookie_refresh_snapshot,
-    normalize_browser_cookie_snapshot,
     normalize_cookie_string,
-    set_cookie_refresh_snapshot,
 )
 from common.utils.time_utils import get_beijing_now_naive
 from app.core.config import get_settings
@@ -145,6 +142,16 @@ class CookiesRefreshTaskService:
         account: XYAccount,
     ) -> None:
         """禁用账号续期成功后自动启用，并通知WebSocket服务启动任务。"""
+        latest_cookie_result = await session.execute(
+            select(XYAccount.cookie).where(
+                XYAccount.account_id == account.account_id,
+                XYAccount.owner_id == account.owner_id,
+            ).with_for_update()
+        )
+        latest_cookie = latest_cookie_result.scalar_one_or_none()
+        if latest_cookie is None:
+            raise RuntimeError("账号不存在或归属不匹配，无法启用账号")
+
         old_status = account.status
         account.status = "active"
         account.disable_reason = None
@@ -163,7 +170,7 @@ class CookiesRefreshTaskService:
                 f"{account.account_id}/start"
             )
             resp = await http_client.post(start_url, json={
-                "cookie_value": account.cookie or "",
+                "cookie_value": latest_cookie,
                 "user_id": account.owner_id,
             })
             ws_success = resp.get("success", False) if isinstance(resp, dict) else False
@@ -246,16 +253,11 @@ class CookiesRefreshTaskService:
             await session.commit()
             return CookiesRefreshProcessResult(status="failed", message=browser_result.message)
 
-        new_cookie_snapshot = normalize_browser_cookie_snapshot(browser_result.cookies)
-        updated_cookie_names = self._get_changed_cookie_labels(old_cookie_snapshot, new_cookie_snapshot)
-        updated_cookie_count = len(updated_cookie_names)
-        merged_cookie_string = build_cookie_string_from_browser_cookies(new_cookie_snapshot)
+        updated_cookie_names = list(browser_result.updated_cookie_names)
+        updated_cookie_count = browser_result.updated_cookie_count
         refresh_time = get_beijing_now_naive()
         next_expire_at = self._build_success_expire_at(refresh_time)
 
-        account.cookie = merged_cookie_string
-        account.metadata_json = set_cookie_refresh_snapshot(account.metadata_json, new_cookie_snapshot)
-        account.last_refresh_at = refresh_time
         schedule.expire_at = next_expire_at
         schedule.last_refresh_at = refresh_time
         schedule.last_status = "success"

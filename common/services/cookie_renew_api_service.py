@@ -12,8 +12,8 @@ Cookie续期共通服务（接口续期 + 浏览器续期）
 
 续期优先级：接口续期 > 浏览器续期 > 账号密码登录
 
-本模块为纯工具服务，不依赖数据库、不依赖定时任务框架，
-任何需要通过接口续期Cookie的场景都可以直接调用。
+本模块不依赖定时任务框架；浏览器兜底时会贯穿数据库账号归属，
+由浏览器续期服务安全地委托 WebSocket 服务执行。
 """
 from __future__ import annotations
 
@@ -75,7 +75,13 @@ class CookieRenewApiService:
             ...
     """
 
-    async def renew(self, cookies_str: str, account_id: str = "", source: str = "") -> CookieRenewApiResult:
+    async def renew(
+        self,
+        cookies_str: str,
+        account_id: str = "",
+        source: str = "",
+        owner_id: int | None = None,
+    ) -> CookieRenewApiResult:
         """执行续期，根据来源和 havana_lgc2_77 字段决定续期顺序。
 
         流程：
@@ -87,6 +93,7 @@ class CookieRenewApiService:
             cookies_str: 当前完整的Cookie字符串
             account_id: 账号ID（仅用于日志标识，可为空）
             source: 调用来源标识（"scheduled_task"表示定时任务触发）
+            owner_id: 数据库中的账号归属ID；跨服务浏览器续期时必填
 
         Returns:
             CookieRenewApiResult: 续期结果
@@ -106,7 +113,12 @@ class CookieRenewApiService:
         # 定时任务触发：固定走 接口续期 → 浏览器续期 → 密码登录
         if source == "scheduled_task":
             logger.info(f"{log_prefix} 定时任务触发，按顺序: 接口续期 → 浏览器续期 → 密码登录")
-            return await self._renew_api_first(cookies_str, account_id, log_prefix)
+            return await self._renew_api_first(
+                cookies_str,
+                account_id,
+                owner_id,
+                log_prefix,
+            )
 
         # 非定时任务：根据 havana_lgc2_77 判断
         has_long_login_token = False
@@ -119,13 +131,27 @@ class CookieRenewApiService:
 
         if has_long_login_token:
             logger.info(f"{log_prefix} 检测到 havana_lgc2_77，优先使用浏览器续期")
-            return await self._renew_browser_first(cookies_str, account_id, log_prefix)
+            return await self._renew_browser_first(
+                cookies_str,
+                account_id,
+                owner_id,
+                log_prefix,
+            )
         else:
             logger.info(f"{log_prefix} 未检测到 havana_lgc2_77，优先使用接口续期")
-            return await self._renew_api_first(cookies_str, account_id, log_prefix)
+            return await self._renew_api_first(
+                cookies_str,
+                account_id,
+                owner_id,
+                log_prefix,
+            )
 
     async def _renew_browser_first(
-        self, cookies_str: str, account_id: str, log_prefix: str
+        self,
+        cookies_str: str,
+        account_id: str,
+        owner_id: int | None,
+        log_prefix: str,
     ) -> CookieRenewApiResult:
         """浏览器续期优先流程：浏览器续期 → 接口续期（必须） → 密码登录"""
         step_details_parts: list[str] = []
@@ -136,7 +162,11 @@ class CookieRenewApiService:
             from common.services.cookie_renew_browser_service import cookie_renew_browser_service
 
             logger.info(f"{log_prefix} 开始浏览器续期...")
-            browser_result = await cookie_renew_browser_service.renew(cookies_str, account_id)
+            browser_result = await cookie_renew_browser_service.renew(
+                cookies_str,
+                account_id,
+                owner_id=owner_id,
+            )
 
             if browser_result.success:
                 step_details_parts.append(f"第1步-浏览器续期: 成功（{browser_result.message}）")
@@ -200,7 +230,11 @@ class CookieRenewApiService:
         )
 
     async def _renew_api_first(
-        self, cookies_str: str, account_id: str, log_prefix: str
+        self,
+        cookies_str: str,
+        account_id: str,
+        owner_id: int | None,
+        log_prefix: str,
     ) -> CookieRenewApiResult:
         """接口续期优先流程：接口续期 → 浏览器续期 → 密码登录"""
         step_details_parts: list[str] = []
@@ -235,7 +269,9 @@ class CookieRenewApiService:
 
             browser_cookies_str = result["new_cookies_str"] or cookies_str
             browser_result = await cookie_renew_browser_service.renew(
-                browser_cookies_str, account_id
+                browser_cookies_str,
+                account_id,
+                owner_id=owner_id,
             )
 
             if browser_result.success:
