@@ -25,6 +25,48 @@ COMPOSE_FILE="$WORK_DIR/docker-compose.deploy.yml"
 ENV_FILE="$WORK_DIR/.env"
 CMD="${1:-update}"
 
+generate_internal_service_secret() {
+    GENERATED_INTERNAL_SERVICE_SECRET=""
+
+    if command -v openssl &> /dev/null; then
+        GENERATED_INTERNAL_SERVICE_SECRET="$(openssl rand -hex 32 2>/dev/null || true)"
+    fi
+
+    if [ "${#GENERATED_INTERNAL_SERVICE_SECRET}" -ne 64 ] || [[ ! "$GENERATED_INTERNAL_SERVICE_SECRET" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        GENERATED_INTERNAL_SERVICE_SECRET=""
+    fi
+
+    if [ -z "$GENERATED_INTERNAL_SERVICE_SECRET" ] && [ -r /dev/urandom ] && command -v od &> /dev/null; then
+        GENERATED_INTERNAL_SERVICE_SECRET="$(od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+
+    if [ "${#GENERATED_INTERNAL_SERVICE_SECRET}" -ne 64 ] || [[ ! "$GENERATED_INTERNAL_SERVICE_SECRET" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo -e "${RED}错误: 无法安全生成 INTERNAL_SERVICE_SECRET，更新已中止${NC}" >&2
+        return 1
+    fi
+}
+
+ensure_internal_service_secret() {
+    local current_value normalized_value
+    current_value="$(grep -E '^INTERNAL_SERVICE_SECRET=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d '=' -f2- | tr -d '\r' || true)"
+    normalized_value="$current_value"
+    normalized_value="${normalized_value#"${normalized_value%%[![:space:]]*}"}"
+    normalized_value="${normalized_value%"${normalized_value##*[![:space:]]}"}"
+
+    if [ -n "$normalized_value" ] && [ "$normalized_value" != '""' ] && [ "$normalized_value" != "''" ]; then
+        return 0
+    fi
+
+    generate_internal_service_secret
+    {
+        printf '\n# Internal service authentication (automatically generated; keep private)\n'
+        printf 'INTERNAL_SERVICE_SECRET=%s\n' "$GENERATED_INTERNAL_SERVICE_SECRET"
+    } >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    unset GENERATED_INTERNAL_SERVICE_SECRET
+    echo -e "${GREEN}✓ 已生成并保存内部服务认证密钥${NC}"
+}
+
 export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-xianyu-auto-reply}"
 
 # 应用服务列表（不含 mysql / redis）
@@ -171,6 +213,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
       - REFRESH_TOKEN_EXPIRE_MINUTES=${REFRESH_TOKEN_EXPIRE_MINUTES:-10080}
       - CORS_ORIGINS=*
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET_is_required}
       - WEBSOCKET_SERVICE_URL=http://websocket:8090
       - SCHEDULER_SERVICE_URL=http://scheduler:8091
       - STATIC_DIR=/app/static
@@ -225,6 +268,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-xianyu@2026}
       - REDIS_DB=${REDIS_DB:-0}
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET_is_required}
       - WEBSOCKET_PORT=8090
       - HOST=0.0.0.0
       - MAX_CAPTCHA_CONCURRENT=${MAX_CAPTCHA_CONCURRENT:-3}
@@ -244,8 +288,8 @@ services:
       - ./xianyu_auto_reply/logs/websocket:/app/websocket/logs
       - ./xianyu_auto_reply/static:/app/static
       - ./xianyu_auto_reply/browser_data:/app/browser_data
-    ports:
-      - "${WEBSOCKET_PORT:-8090}:8090"
+    expose:
+      - "8090"
     networks:
       - xianyu-network
     depends_on:
@@ -281,6 +325,7 @@ services:
       - HOST=0.0.0.0
       - REDELIVERY_INTERVAL=${REDELIVERY_INTERVAL:-5}
       - RATE_INTERVAL=${RATE_INTERVAL:-20}
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET_is_required}
       - WEBSOCKET_SERVICE_URL=http://websocket:8090
       - BACKEND_WEB_SERVICE_URL=http://backend-web:8089
       - STATIC_DIR=/app/static
@@ -356,7 +401,6 @@ REDIS_DB=0
 # 端口配置
 FRONTEND_PORT=9000
 BACKEND_WEB_PORT=8089
-WEBSOCKET_PORT=8090
 SCHEDULER_PORT=8091
 
 # 镜像配置
@@ -417,13 +461,10 @@ ENVEOF
         echo ""
     fi
 
-    # 如果 docker-compose.deploy.yml 不存在，自动生成
-    if [ ! -f "$COMPOSE_FILE" ]; then
-        echo -e "${YELLOW}[信息] 未找到 docker-compose.deploy.yml，自动生成...${NC}"
-        generate_compose_file
-        echo -e "${GREEN}✓ docker-compose.deploy.yml 已生成${NC}"
-        echo ""
-    fi
+    ensure_internal_service_secret
+
+    # 始终重新生成，确保旧部署文件不会继续发布宿主机 8090 端口
+    generate_compose_file
 }
 
 # 创建宿主机挂载目录
@@ -581,15 +622,13 @@ cleanup_old_app_images() {
 }
 
 print_success_info() {
-    local frontend_port backend_web_port websocket_port scheduler_port
+    local frontend_port backend_web_port scheduler_port
     frontend_port="$(read_env_value FRONTEND_PORT)"
     backend_web_port="$(read_env_value BACKEND_WEB_PORT)"
-    websocket_port="$(read_env_value WEBSOCKET_PORT)"
     scheduler_port="$(read_env_value SCHEDULER_PORT)"
 
     frontend_port="${frontend_port:-9000}"
     backend_web_port="${backend_web_port:-8089}"
-    websocket_port="${websocket_port:-8090}"
     scheduler_port="${scheduler_port:-8091}"
 
     echo -e "${GREEN}=========================================="
@@ -599,7 +638,6 @@ print_success_info() {
     echo "服务访问地址："
     echo "  前端:        http://服务器IP:${frontend_port}"
     echo "  Backend-Web: http://服务器IP:${backend_web_port}"
-    echo "  WebSocket:   http://服务器IP:${websocket_port}"
     echo "  Scheduler:   http://服务器IP:${scheduler_port}"
     echo ""
     echo "常用命令："

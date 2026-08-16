@@ -8,20 +8,44 @@ COOKIES续期内部接口
 """
 from __future__ import annotations
 
+from hmac import compare_digest
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from common.core.config import get_internal_service_secret
 from common.db.session import async_session_maker
 from common.models.xy_account import XYAccount
 from common.services.captcha.concurrency import run_browser_task
 from common.services.cookie_renew_browser_service import cookie_renew_browser_service
 from app.services.xianyu.cookies_refresh_service import cookies_refresh_service
 
-router = APIRouter(prefix="/internal", tags=["internal"])
+
+def verify_internal_service_secret(
+    x_internal_service_secret: str | None = Header(
+        default=None,
+        alias="X-Internal-Service-Secret",
+    ),
+) -> None:
+    """校验内部服务间通信密钥。"""
+    expected_secret = get_internal_service_secret()
+    provided_secret_bytes = (x_internal_service_secret or "").encode("utf-8")
+    expected_secret_bytes = expected_secret.encode("utf-8")
+    if not compare_digest(provided_secret_bytes, expected_secret_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid internal service secret",
+        )
+
+
+router = APIRouter(
+    prefix="/internal",
+    tags=["internal"],
+    dependencies=[Depends(verify_internal_service_secret)],
+)
 
 
 class CookiesRefreshRequest(BaseModel):

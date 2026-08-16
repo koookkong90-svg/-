@@ -83,6 +83,7 @@ services:
       - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-1440}
       - REFRESH_TOKEN_EXPIRE_MINUTES=${REFRESH_TOKEN_EXPIRE_MINUTES:-10080}
       - CORS_ORIGINS=*
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET_is_required}
       - WEBSOCKET_SERVICE_URL=http://websocket:8090
       - SCHEDULER_SERVICE_URL=http://scheduler:8091
       - STATIC_DIR=/app/static
@@ -140,6 +141,7 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-xianyu@2026}
       - REDIS_DB=${REDIS_DB:-0}
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET_is_required}
       - WEBSOCKET_PORT=8090
       - HOST=0.0.0.0
       - MAX_CAPTCHA_CONCURRENT=${MAX_CAPTCHA_CONCURRENT:-3}
@@ -159,8 +161,8 @@ services:
       - websocket_logs:/app/websocket/logs
       - static-files:/app/static
       - browser_data:/app/browser_data
-    ports:
-      - "${WEBSOCKET_PORT:-8090}:8090"
+    expose:
+      - "8090"
     networks:
       - xianyu-network
     depends_on:
@@ -199,6 +201,7 @@ services:
       - HOST=0.0.0.0
       - REDELIVERY_INTERVAL=${REDELIVERY_INTERVAL:-5}
       - RATE_INTERVAL=${RATE_INTERVAL:-20}
+      - INTERNAL_SERVICE_SECRET=${INTERNAL_SERVICE_SECRET:?INTERNAL_SERVICE_SECRET_is_required}
       - WEBSOCKET_SERVICE_URL=http://websocket:8090
       - BACKEND_WEB_SERVICE_URL=http://backend-web:8089
       - STATIC_DIR=/app/static

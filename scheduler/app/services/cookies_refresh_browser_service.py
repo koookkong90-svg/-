@@ -13,6 +13,7 @@ from typing import Any
 
 from loguru import logger
 
+from common.core.config import get_internal_service_secret
 from common.models.xy_account import XYAccount
 from app.core.config import get_settings
 from app.core.http_client import get_http_client
@@ -39,6 +40,9 @@ class CookiesRefreshBrowserService:
             response = await http_client.post(
                 f"{settings.websocket_service_url}/internal/cookies/refresh",
                 json={"account_id": account.account_id},
+                headers={
+                    "X-Internal-Service-Secret": get_internal_service_secret(),
+                },
             )
         except Exception as exc:
             logger.error(f"【COOKIES续期】账号 {account.account_id} 调用 websocket COOKIES续期接口失败: {exc}")

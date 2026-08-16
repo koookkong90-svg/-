@@ -16,6 +16,28 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class InternalServiceAuthConfig(BaseSettings):
+    """仅用于加载必填的内部服务间通信密钥。"""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    internal_service_secret: str = Field(
+        min_length=1,
+        repr=False,
+        alias="INTERNAL_SERVICE_SECRET",
+    )
+
+
+@lru_cache
+def get_internal_service_secret() -> str:
+    """返回必填的内部服务间通信密钥。"""
+    return InternalServiceAuthConfig().internal_service_secret
+
+
 class BaseConfig(BaseSettings):
     """
     所有服务的基础配置类

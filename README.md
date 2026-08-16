@@ -167,6 +167,8 @@ curl -fsSL https://xy-update.zhinianboke.com/deploy.sh | sed 's/\r$//' | bash
 ```
 
 该脚本会自动完成部署所需的配置生成、镜像拉取、旧容器清理与服务启动。
+当 `.env` 缺少 `INTERNAL_SERVICE_SECRET` 时，脚本会生成高强度随机值并持久化，后续更新会继续复用。
+Docker 部署中的 WebSocket 8090 端口仅供容器网络内部访问，不发布到宿主机。
 
 更新版本，直接执行一键更新脚本即可：
 
@@ -183,6 +185,7 @@ bash deploy.sh
 ```
 
 - 首次运行会自动生成 `.env` 配置文件和 `docker-compose.deploy.yml`
+- 首次运行会自动生成并保存内部服务通信密钥，无需额外手工配置
 - 从阿里云镜像仓库拉取预构建镜像并启动
 - 如果检测到加密版容器会自动清理（保留数据卷）
 - 部署完成后默认访问地址：
@@ -273,6 +276,8 @@ REDIS_PORT=6379
 REDIS_PASSWORD=
 REDIS_DB=0
 CORS_ORIGINS=*
+# 三个服务必须使用相同值，可用 openssl rand -hex 32 生成
+INTERNAL_SERVICE_SECRET=
 BACKEND_WEB_PORT=8089
 WEBSOCKET_PORT=8090
 SCHEDULER_PORT=8091
@@ -351,6 +356,7 @@ npm run dev
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL 连接 |
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` / `REDIS_DB` | Redis 连接 |
 | `JWT_SECRET_KEY` | JWT 密钥，由数据库统一托管（首次启动自动生成并持久化），无需手动配置 |
+| `INTERNAL_SERVICE_SECRET` | backend-web、scheduler、websocket 共用的内部接口密钥；一键部署脚本会自动生成并保存 |
 | `BACKEND_WEB_PORT` / `WEBSOCKET_PORT` / `SCHEDULER_PORT` | 各服务端口 |
 | `WEBSOCKET_SERVICE_URL` / `SCHEDULER_SERVICE_URL` / `BACKEND_WEB_SERVICE_URL` | 服务间调用地址 |
 | `BACKEND_WEB_PUBLIC_URL` | 对外访问地址，用于生成文件 URL |

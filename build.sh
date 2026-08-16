@@ -17,6 +17,48 @@ WORK_DIR="$(cd "$(dirname "$0")" && pwd)"
 COMPOSE_FILE="$WORK_DIR/docker-compose.yml"
 ENV_FILE="$WORK_DIR/.env"
 
+generate_internal_service_secret() {
+    GENERATED_INTERNAL_SERVICE_SECRET=""
+
+    if command -v openssl &> /dev/null; then
+        GENERATED_INTERNAL_SERVICE_SECRET="$(openssl rand -hex 32 2>/dev/null || true)"
+    fi
+
+    if [ "${#GENERATED_INTERNAL_SERVICE_SECRET}" -ne 64 ] || [[ ! "$GENERATED_INTERNAL_SERVICE_SECRET" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        GENERATED_INTERNAL_SERVICE_SECRET=""
+    fi
+
+    if [ -z "$GENERATED_INTERNAL_SERVICE_SECRET" ] && [ -r /dev/urandom ] && command -v od &> /dev/null; then
+        GENERATED_INTERNAL_SERVICE_SECRET="$(od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+
+    if [ "${#GENERATED_INTERNAL_SERVICE_SECRET}" -ne 64 ] || [[ ! "$GENERATED_INTERNAL_SERVICE_SECRET" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo -e "${RED}错误: 无法安全生成 INTERNAL_SERVICE_SECRET，操作已中止${NC}" >&2
+        return 1
+    fi
+}
+
+ensure_internal_service_secret() {
+    local current_value normalized_value
+    current_value="$(grep -E '^INTERNAL_SERVICE_SECRET=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d '=' -f2- | tr -d '\r' || true)"
+    normalized_value="$current_value"
+    normalized_value="${normalized_value#"${normalized_value%%[![:space:]]*}"}"
+    normalized_value="${normalized_value%"${normalized_value##*[![:space:]]}"}"
+
+    if [ -n "$normalized_value" ] && [ "$normalized_value" != '""' ] && [ "$normalized_value" != "''" ]; then
+        return 0
+    fi
+
+    generate_internal_service_secret
+    {
+        printf '\n# Internal service authentication (automatically generated; keep private)\n'
+        printf 'INTERNAL_SERVICE_SECRET=%s\n' "$GENERATED_INTERNAL_SERVICE_SECRET"
+    } >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    unset GENERATED_INTERNAL_SERVICE_SECRET
+    echo -e "${GREEN}✓ 已生成并保存内部服务认证密钥${NC}"
+}
+
 # 项目容器名前缀
 PROJECT_NAME="xianyu-auto-reply"
 # 本项目的容器名列表
@@ -64,11 +106,9 @@ echo ""
 
 # ========== 生成 .env（首次） ==========
 generate_env() {
-    if [ -f "$ENV_FILE" ]; then
-        return
-    fi
-    echo -e "${YELLOW}[提示] 首次构建，生成默认 .env 配置${NC}"
-    cat > "$ENV_FILE" << 'ENVEOF'
+    if [ ! -f "$ENV_FILE" ]; then
+        echo -e "${YELLOW}[提示] 首次构建，生成默认 .env 配置${NC}"
+        cat > "$ENV_FILE" << 'ENVEOF'
 # ==========================================
 # 闲鱼自动回复系统 - 环境变量配置（本地构建）
 # ==========================================
@@ -88,7 +128,6 @@ REDIS_DB=0
 # 端口
 FRONTEND_PORT=9000
 BACKEND_WEB_PORT=8089
-WEBSOCKET_PORT=8090
 SCHEDULER_PORT=8091
 
 # 日志级别
@@ -105,8 +144,11 @@ RATE_INTERVAL=20
 # 验证码并发数
 MAX_CAPTCHA_CONCURRENT=3
 ENVEOF
-    echo -e "${GREEN}✓ 已生成 .env 文件，如需修改请编辑后重新运行${NC}"
-    echo ""
+        echo -e "${GREEN}✓ 已生成 .env 文件，如需修改请编辑后重新运行${NC}"
+        echo ""
+    fi
+
+    ensure_internal_service_secret
     # 重新设置 DC_CMD 以包含 env-file
     DC_CMD="$DC -f $COMPOSE_FILE --env-file $ENV_FILE"
 }
@@ -177,7 +219,6 @@ start_services() {
     echo "服务访问地址："
     echo "  前端:         http://localhost:9000"
     echo "  Backend-Web:  http://localhost:8089"
-    echo "  WebSocket:    http://localhost:8090"
     echo "  Scheduler:    http://localhost:8091"
     echo ""
     echo "默认账号: admin / admin123"
@@ -193,16 +234,15 @@ start_services() {
 
 # ========== 命令分发 ==========
 CMD="${1:-rebuild}"
+generate_env
 
 case "$CMD" in
     rebuild)
-        generate_env
         clean_old
         build_images
         start_services
         ;;
     start)
-        generate_env
         echo -e "${YELLOW}启动服务...${NC}"
         $DC_CMD up -d
         sleep 10
@@ -214,8 +254,8 @@ case "$CMD" in
         echo -e "${GREEN}✓ 服务已停止${NC}"
         ;;
     restart)
-        echo -e "${YELLOW}重启服务...${NC}"
-        $DC_CMD restart
+        echo -e "${YELLOW}重新应用配置并重启服务...${NC}"
+        $DC_CMD up -d --force-recreate
         sleep 10
         $DC_CMD ps
         ;;

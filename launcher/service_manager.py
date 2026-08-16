@@ -11,6 +11,7 @@
 import functools
 import http.server
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -188,6 +189,36 @@ class ServiceManager:
         # 否则 scheduler 写入的备份文件 backend-web 无法读取下载（本地源码模式各服务 cwd 不同）
         backup_dir = (self.project_root / "backups").as_posix()
 
+        # 三个服务必须使用同一个内部通信密钥。优先复用已有配置，避免每次启动都轮换；
+        # 首次运行时使用密码学安全随机数生成，并且绝不输出到日志。
+        internal_service_secret = ""
+        for service_name in ("backend-web", "websocket", "scheduler"):
+            env_path = self.project_root / service_name / ".env"
+            if not env_path.is_file():
+                continue
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    key, separator, value = line.partition("=")
+                    if separator and key.strip() == "INTERNAL_SERVICE_SECRET":
+                        candidate = value.strip()
+                        normalized_candidate = candidate
+                        if (
+                            len(normalized_candidate) >= 2
+                            and normalized_candidate[0] == normalized_candidate[-1]
+                            and normalized_candidate[0] in ("'", '"')
+                        ):
+                            normalized_candidate = normalized_candidate[1:-1].strip()
+                        if normalized_candidate and not candidate.startswith("#"):
+                            internal_service_secret = candidate
+                            break
+            except (OSError, UnicodeError):
+                continue
+            if internal_service_secret:
+                break
+
+        if not internal_service_secret:
+            internal_service_secret = secrets.token_hex(32)
+
         # backend-web .env
         backend_env = (
             f"ENVIRONMENT=production\n"
@@ -208,6 +239,7 @@ class ServiceManager:
             f"CORS_ORIGINS=*\n"
             f"WEBSOCKET_SERVICE_URL=http://127.0.0.1:8090\n"
             f"SCHEDULER_SERVICE_URL=http://127.0.0.1:8091\n"
+            f"INTERNAL_SERVICE_SECRET={internal_service_secret}\n"
             f"STATIC_DIR=static\n"
             f"BACKUP_DIR={backup_dir}\n"
             f"FRONTEND_PUBLIC_URL=http://127.0.0.1:9000\n"
@@ -233,6 +265,7 @@ class ServiceManager:
             f"TOKEN_REFRESH_INTERVAL=72000\n"
             f"TOKEN_RETRY_INTERVAL=7200\n"
             f"BACKEND_WEB_SERVICE_URL=http://127.0.0.1:8089\n"
+            f"INTERNAL_SERVICE_SECRET={internal_service_secret}\n"
             f"STATIC_DIR=static\n"
         )
         
@@ -254,6 +287,7 @@ class ServiceManager:
             f"RATE_INTERVAL=20\n"
             f"WEBSOCKET_SERVICE_URL=http://127.0.0.1:8090\n"
             f"BACKEND_WEB_SERVICE_URL=http://127.0.0.1:8089\n"
+            f"INTERNAL_SERVICE_SECRET={internal_service_secret}\n"
             f"STATIC_DIR=static\n"
             f"BACKUP_DIR={backup_dir}\n"
         )

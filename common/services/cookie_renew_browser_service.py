@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional
 import aiohttp
 from loguru import logger
 
-from common.core.config import get_settings
+from common.core.config import get_internal_service_secret, get_settings
 from common.services.captcha.concurrency import (
     account_browser_lock_manager,
     concurrency_manager,
@@ -235,6 +235,9 @@ class CookieRenewBrowserService:
                 async with session.post(
                     renew_url,
                     json={"account_id": account_id, "cookies_str": cookies_str},
+                    headers={
+                        "X-Internal-Service-Secret": get_internal_service_secret(),
+                    },
                 ) as response:
                     if response.status != 200:
                         text = await response.text()
