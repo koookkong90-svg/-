@@ -477,3 +477,133 @@ curl -fsSL https://xy-update.zhinianboke.com/deploy.sh | sed 's/\r$//' | bash
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=zhinianboke/xianyu-auto-reply&type=Date)](https://www.star-history.com/#zhinianboke/xianyu-auto-reply&Date)
+
+## 本地灾难备份与恢复（第一版）
+
+这一版备份工具用于现有的单机 Docker Compose 部署，不修改 `docker-compose.yml`，也不改变应用的正常启动方式。脚本只适用于 Linux 云服务器；Windows 开发机可做语法检查，但不要直接执行实际备份或恢复。
+
+### 备份范围
+
+每个完整备份目录包含：
+
+- MySQL 的 `mysqldump` 逻辑备份（gzip 压缩）。
+- 项目根目录 `.env`。
+- Docker 卷 `static-files`，包含用户上传文件等静态数据。
+- Docker 卷 `browser_data`，包含浏览器会话数据。
+- `SHA256SUMS` 校验文件和 `COMPLETE` 完成标记。
+
+默认备份根目录是 `/var/backups/xianyu-auto-reply`，完整备份目录的格式为：
+
+```text
+/var/backups/xianyu-auto-reply/
+└── xianyu-auto-reply_backup_YYYYMMDD_HHMMSS/
+```
+
+只会清理超过 7 天、名称和项目标记均通过严格校验的完整备份。未完成备份不会被当作可恢复备份。
+
+第一版不备份 Redis、日志卷或应用自身的 `backup-files` 卷，也不包含远程 rsync/scp、远端保留策略、自动回滚或 age/GPG 加密。Redis 不是权威业务数据库，恢复脚本不会读取、覆盖或删除 `redis_data`；全新服务器由 Compose 创建新的 Redis 数据，已有部署则保留其现有 Redis 卷。
+
+### 配置
+
+在项目根目录执行：
+
+```bash
+cp backup.env.example backup.env
+chmod 600 backup.env
+```
+
+根据服务器环境编辑 `backup.env`。该文件只保存备份工具配置，不应保存数据库密码；数据库连接参数仍由根目录 `.env` 和 MySQL 容器环境提供。真实 `backup.env` 已被 Git 忽略，不要提交它。
+
+可配置项如下；相对路径会以项目根目录为基准解析：
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `LOCAL_BACKUP_DIR` | `/var/backups/xianyu-auto-reply` | 本地备份根目录 |
+| `LOCAL_RETENTION_DAYS` | `7` | 完整备份保留天数 |
+| `COMPOSE_PROJECT_NAME` | `xianyu-auto-reply` | 第一版固定项目名，不应修改 |
+| `COMPOSE_FILE` | `./docker-compose.yml` | 第一版固定使用根目录 Compose 文件，不应改为其他文件 |
+| `COMPOSE_ENV_FILE` | `./.env` | 第一版固定备份和恢复根目录 `.env`，不应改为其他文件 |
+| `BACKUP_QUIESCE_SERVICES` | `true` | 备份时短暂停止写入服务以获得一致文件快照 |
+
+默认目录位于 `/var/backups`。运行脚本的 Linux 用户必须能够创建并写入该目录；也可以先由管理员创建目录并把所有权授予执行备份的专用用户：
+
+```bash
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" \
+  /var/backups/xianyu-auto-reply
+```
+
+### 第一次手动备份
+
+确认当前项目使用根目录 `docker-compose.yml` 正常运行，尤其是 MySQL 已健康，然后在项目根目录执行：
+
+```bash
+bash scripts/backup/create-backup.sh
+```
+
+脚本不会在命令行或日志中输出数据库密码。备份成功后会输出生成的完整备份目录；只有所有文件生成并通过基础检查后，目录内才会出现 `COMPLETE`。
+
+默认的 `BACKUP_QUIESCE_SERVICES=true` 会在快照期间短暂、优雅停止 `backend-web`、`websocket` 和 `scheduler`，完成 MySQL、静态文件及浏览器数据归档后立即恢复原本正在运行的服务。MySQL、Redis 和 frontend 不会因创建备份而停止。若改为 `false`，服务不会中断，但正在变化的静态文件或浏览器 Profile 只能视为尽力一致。
+
+### 验证备份
+
+把下面的占位目录替换为实际备份目录：
+
+```bash
+bash scripts/backup/restore-backup.sh verify \
+  /var/backups/xianyu-auto-reply/xianyu-auto-reply_backup_YYYYMMDD_HHMMSS
+```
+
+`verify` 是只读操作，会检查备份目录名称、`COMPLETE`、必需文件、SHA-256、gzip 文件以及 tar 归档的安全性，不会启动、停止或修改项目容器和数据。
+
+### 恢复备份
+
+恢复适用于新服务器重建，也可用于已有部署的灾难恢复。建议按以下顺序操作：
+
+1. 在新服务器安装 Docker Engine、Docker Compose 和 Git。
+2. 克隆项目，并尽量切换到生成备份时使用的代码版本。
+3. 将完整备份目录复制到新服务器本地。
+4. 先执行上述 `verify` 命令，确认校验全部通过。
+5. 在项目根目录执行恢复命令，并按脚本提示确认：
+
+   ```bash
+   bash scripts/backup/restore-backup.sh restore \
+     /var/backups/xianyu-auto-reply/xianyu-auto-reply_backup_YYYYMMDD_HHMMSS
+   ```
+
+6. 恢复脚本会先检查目标状态。如果存在 `.env`、卷数据或 MySQL 数据，必须在覆盖任何内容之前生成恢复前安全备份；安全备份失败时不会继续恢复。
+7. 安全检查完成后，脚本才恢复根目录 `.env`，再准备并恢复 `static-files`、`browser_data`，启动 MySQL 并导入逻辑备份，最后恢复应用服务。
+8. 恢复后检查 `docker compose ps`、前端、后端健康接口、静态/上传文件、WebSocket、浏览器登录状态和调度服务。
+
+对已有部署执行恢复时，MySQL 必须能够启动且 `mysql`、`backend-web`、`websocket` 的现有 Compose 容器必须可用于生成安全备份。只剩卷、缺少原 `.env`、MySQL 无法导出或相关容器缺失时，脚本会保守中止，不会跳过安全备份继续覆盖旧数据。
+
+恢复会覆盖目标部署中的持久数据，是破坏性操作。不要跳过校验或二次确认，也不要在恢复前手动删除原有卷。备份和恢复脚本不会使用、文档也不要求使用以下命令：
+
+```text
+docker compose down -v
+docker volume rm
+docker system prune
+```
+
+第一版不提供自动回滚。目标服务器存在数据时生成的恢复前安全备份应保留到人工验证恢复结果之后。
+
+### 每天自动备份
+
+先成功完成一次手动备份和 `verify`，再为同一个 Linux 用户配置 cron。以下示例每天凌晨 02:15 执行，并用 `flock` 防止任务重叠；请将项目路径替换为实际绝对路径：
+
+```cron
+15 2 * * * cd /opt/xianyu-auto-reply && /usr/bin/flock -n /var/backups/xianyu-auto-reply/.cron.lock /bin/bash scripts/backup/create-backup.sh >> /var/backups/xianyu-auto-reply/backup.log 2>&1
+```
+
+确保执行用户对备份目录、锁文件和日志文件具有相应权限。定期检查 cron 退出状态和日志，不能只依赖目录是否存在来判断备份成功。
+
+### 验证备份确实可恢复
+
+校验和成功只能证明文件没有损坏，不能替代恢复演练。建议至少每月或每季度在独立临时服务器或虚拟机中进行一次完整演练：
+
+1. 从零克隆相同版本的项目。
+2. 对备份执行 `verify`，再执行 `restore`。
+3. 确认 MySQL 表和关键业务数据可查询。
+4. 确认静态资源、用户上传文件和浏览器数据已恢复。
+5. 确认所有服务正常运行，并完成一次实际登录和核心业务检查。
+
+备份包中的 `.env` 和 `browser_data` 含敏感信息。备份目录应保持仅备份用户可读（目录 `0700`、文件 `0600`），不得放入代码仓库、公共网盘或未加密的共享目录。

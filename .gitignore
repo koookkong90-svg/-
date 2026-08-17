@@ -8,6 +8,7 @@
 **/.env
 **/.env.local
 **/.env.*.local
+/backup.env
 .env.enc
 .env.remote
 !**/.env.example
