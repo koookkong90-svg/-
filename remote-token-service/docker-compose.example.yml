@@ -1,0 +1,44 @@
+"""
+Docker Compose 配置示例
+
+将以下内容添加到主项目的 docker-compose.yml 中的 services 部分
+"""
+
+# 在 docker-compose.yml 中添加此服务
+
+xianyu-remote-token-server:
+  build:
+    context: ./remote-token-service
+    dockerfile: Dockerfile
+  container_name: xianyu-token-server
+  restart: unless-stopped
+  environment:
+    API_KEY: ${REMOTE_TOKEN_API_KEY:-your-32-char-secret-key}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    REQUEST_TIMEOUT: ${REQUEST_TIMEOUT:-30}
+    LISTEN_HOST: "0.0.0.0"
+    LISTEN_PORT: "8000"
+  ports:
+    - "8001:8000"
+  networks:
+    - xianyu-network
+  healthcheck:
+    test:
+      - CMD
+      - curl
+      - -f
+      - http://localhost:8000/health
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 10s
+  depends_on:
+    # 可选：如果想在主服务后启动
+    # - backend-web
+    - null
+  volumes:
+    # 可选：挂载日志目录
+    # - ./logs/remote-token-server:/app/logs
+    - /dev/null
+  labels:
+    com.example.description: "Xianyu Remote Token Server"
